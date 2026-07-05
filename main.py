@@ -1,4 +1,5 @@
 import os
+import csv
 from random import random
 import numpy as np
 import torch
@@ -168,8 +169,9 @@ class BridgeRunner(L.LightningModule):
         self.log("val_ssim", metrics["ssim_mean"].mean(), on_epoch=True, prog_bar=True, sync_dist=True)
 
         # Log sample images
-        if batch_idx == 0 and self.global_rank == 0:
-            path = os.path.join(self.logger.log_dir, "val_samples", f"epoch_{self.current_epoch}.png")
+        log_dir = getattr(self.logger, "log_dir", None)
+        if batch_idx == 0 and self.global_rank == 0 and log_dir is not None:
+            path = os.path.join(log_dir, "val_samples", f"epoch_{self.current_epoch}.png")
             save_image_pair(x0, x0_pred, path)
 
     def on_test_start(self):
@@ -222,9 +224,10 @@ class BridgeRunner(L.LightningModule):
             source = dataset.source
             target = dataset.target
 
+            test_samples_dir = os.path.join(self.logger.log_dir, "test_samples")
+
             # Save predictions
-            path = os.path.join(self.logger.log_dir, "test_samples", "pred.npy")
-            save_preds(pred, path)
+            save_preds(pred, os.path.join(test_samples_dir, "pred.npy"))
 
             # Compute metrics and save report
             metrics = compute_metrics(
@@ -232,16 +235,151 @@ class BridgeRunner(L.LightningModule):
                 pred_images=pred,
                 mask=self.mask,
                 subject_ids=self.subject_ids,
-                report_path=os.path.join(self.logger.log_dir, "test_samples", "report.txt")
+                report_path=os.path.join(test_samples_dir, "report.txt")
             )
 
-            # Print metrics
-            print(f"PSNR: {metrics['psnr_mean']:.2f} ± {metrics['psnr_std']:.2f}")
-            print(f"SSIM: {metrics['ssim_mean']:.2f} ± {metrics['ssim_std']:.2f}")
+            # Print all metrics
+            print(f"PSNR: {metrics['psnr_mean']:.2f} +/- {metrics['psnr_std']:.2f}")
+            print(f"SSIM: {metrics['ssim_mean']:.2f} +/- {metrics['ssim_std']:.2f}")
+            print(f"MAE: {metrics['mae_mean']:.4f} +/- {metrics['mae_std']:.4f}")
+            print(f"MSE: {metrics['mse_mean']:.4f} +/- {metrics['mse_std']:.4f}")
+            print(f"RMSE: {metrics['rmse_mean']:.4f} +/- {metrics['rmse_std']:.4f}")
+            print(f"NRMSE: {metrics['nrmse_mean']:.4f} +/- {metrics['nrmse_std']:.4f}")
+            print(f"NCC: {metrics['ncc_mean']:.4f} +/- {metrics['ncc_std']:.4f}")
+
+            # Write report_extended.txt
+            ext_path = os.path.join(test_samples_dir, "report_extended.txt")
+            with open(ext_path, 'w') as f:
+                for key in ['psnr', 'ssim', 'mae', 'mse', 'rmse', 'nrmse', 'ncc']:
+                    f.write(f"{key.upper()}: {metrics[f'{key}_mean']:.4f} +/- {metrics[f'{key}_std']:.4f}\n")
+
+            # Load metadata for CSV reports
+            metadata_path = os.path.join(dataset.data_dir, "metadata_test.csv")
+            metadata = None
+            if os.path.exists(metadata_path):
+                with open(metadata_path, newline='', encoding='utf-8') as f:
+                    metadata = list(csv.DictReader(f))
+
+            # Write slice_metrics.csv
+            n_slices = len(pred)
+            fieldnames = ["output_index", "slice_file", "case_id", "vendor",
+                          "slice_index", "foreground_ratio",
+                          "psnr", "ssim", "mae", "mse", "rmse", "nrmse", "ncc"]
+            slice_rows = []
+            for i in range(n_slices):
+                case_id = str(self.subject_ids[i]) if self.subject_ids is not None else ""
+                vendor = ""
+                slice_index = ""
+                foreground_ratio = ""
+                if metadata is not None and i < len(metadata):
+                    row = metadata[i]
+                    vendor = row.get("vendor", "")
+                    slice_index = row.get("slice_index", "")
+                    foreground_ratio = row.get("foreground_ratio", "")
+                slice_rows.append({
+                    "output_index": str(i),
+                    "slice_file": f"slice_{i}.npy",
+                    "case_id": case_id,
+                    "vendor": vendor,
+                    "slice_index": str(slice_index),
+                    "foreground_ratio": str(foreground_ratio),
+                    "psnr": f"{metrics['psnrs'][i]:.6f}",
+                    "ssim": f"{metrics['ssims'][i]:.6f}",
+                    "mae": f"{metrics['maes'][i]:.6f}",
+                    "mse": f"{metrics['mses'][i]:.6f}",
+                    "rmse": f"{metrics['rmses'][i]:.6f}",
+                    "nrmse": f"{metrics['nrmses'][i]:.6f}",
+                    "ncc": f"{metrics['nccs'][i]:.6f}",
+                })
+            with open(os.path.join(test_samples_dir, "slice_metrics.csv"), 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(slice_rows)
+
+            # Write case_metrics.csv
+            case_fieldnames = ["case_id", "vendor", "num_slices",
+                               "psnr_mean", "psnr_std", "ssim_mean", "ssim_std",
+                               "mae_mean", "mae_std", "mse_mean", "mse_std",
+                               "rmse_mean", "rmse_std", "nrmse_mean", "nrmse_std",
+                               "ncc_mean", "ncc_std"]
+            case_rows = []
+            if self.subject_ids is not None:
+                seen_vendors = {}
+                if metadata is not None:
+                    for row in metadata:
+                        cid = row.get("case_id", "")
+                        v = row.get("vendor", "")
+                        if cid and not seen_vendors.get(cid):
+                            seen_vendors[cid] = v
+                for sid, srep in sorted(metrics['subject_reports'].items()):
+                    vend = seen_vendors.get(str(sid), "")
+                    case_rows.append({
+                        "case_id": str(sid),
+                        "vendor": vend,
+                        "num_slices": str(len(srep['psnrs'])),
+                        "psnr_mean": f"{srep['psnr_mean']:.6f}", "psnr_std": f"{srep['psnr_std']:.6f}",
+                        "ssim_mean": f"{srep['ssim_mean']:.6f}", "ssim_std": f"{srep['ssim_std']:.6f}",
+                        "mae_mean": f"{srep['mae_mean']:.6f}", "mae_std": f"{srep['mae_std']:.6f}",
+                        "mse_mean": f"{srep['mse_mean']:.6f}", "mse_std": f"{srep['mse_std']:.6f}",
+                        "rmse_mean": f"{srep['rmse_mean']:.6f}", "rmse_std": f"{srep['rmse_std']:.6f}",
+                        "nrmse_mean": f"{srep['nrmse_mean']:.6f}", "nrmse_std": f"{srep['nrmse_std']:.6f}",
+                        "ncc_mean": f"{srep['ncc_mean']:.6f}", "ncc_std": f"{srep['ncc_std']:.6f}",
+                    })
+            with open(os.path.join(test_samples_dir, "case_metrics.csv"), 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=case_fieldnames)
+                writer.writeheader()
+                writer.writerows(case_rows)
+
+            # Write report.md
+            n_cases = len(case_rows)
+            md_lines = [
+                "# LiQA SelfRDB T1->GED4 Report",
+                "",
+                f"- Dataset: `{dataset.data_dir}`",
+                f"- Predictions: `{os.path.join(test_samples_dir, 'pred.npy')}`",
+                f"- Test cases: {n_cases}",
+                f"- Test slices: {n_slices}",
+                "",
+                "## Primary Metrics (Case Averaged)",
+                "",
+                "| Metric | Mean | Std | Direction |",
+                "| --- | ---: | ---: | --- |",
+                f"| PSNR | {metrics['psnr_mean']:.4f} | {metrics['psnr_std']:.4f} | higher better |",
+                f"| SSIM | {metrics['ssim_mean']:.4f} | {metrics['ssim_std']:.4f} | higher better |",
+                f"| MAE | {metrics['mae_mean']:.4f} | {metrics['mae_std']:.4f} | lower better |",
+                f"| MSE | {metrics['mse_mean']:.4f} | {metrics['mse_std']:.4f} | lower better |",
+                f"| RMSE | {metrics['rmse_mean']:.4f} | {metrics['rmse_std']:.4f} | lower better |",
+                f"| NRMSE | {metrics['nrmse_mean']:.4f} | {metrics['nrmse_std']:.4f} | lower better |",
+                f"| NCC | {metrics['ncc_mean']:.4f} | {metrics['ncc_std']:.4f} | higher better |",
+                "",
+                "## Slice Metrics",
+                "",
+                "| Metric | Mean | Std |",
+                "| --- | ---: | ---: |",
+                f"| PSNR | {np.nanmean(metrics['psnrs']):.4f} | {np.nanstd(metrics['psnrs']):.4f} |",
+                f"| SSIM | {np.nanmean(metrics['ssims']):.4f} | {np.nanstd(metrics['ssims']):.4f} |",
+                f"| MAE | {np.nanmean(metrics['maes']):.4f} | {np.nanstd(metrics['maes']):.4f} |",
+                f"| MSE | {np.nanmean(metrics['mses']):.4f} | {np.nanstd(metrics['mses']):.4f} |",
+                f"| RMSE | {np.nanmean(metrics['rmses']):.4f} | {np.nanstd(metrics['rmses']):.4f} |",
+                f"| NRMSE | {np.nanmean(metrics['nrmses']):.4f} | {np.nanstd(metrics['nrmses']):.4f} |",
+                f"| NCC | {np.nanmean(metrics['nccs']):.4f} | {np.nanstd(metrics['nccs']):.4f} |",
+                "",
+                "## Case Table",
+                "",
+                "| Case | Vendor | Slices | PSNR | SSIM | MAE | RMSE | NRMSE | NCC |",
+                "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+            ]
+            for cr in case_rows:
+                md_lines.append(
+                    "| {case_id} | {vendor} | {num_slices} | {psnr_mean} | {ssim_mean} | "
+                    "{mae_mean} | {rmse_mean} | {nrmse_mean} | {ncc_mean} |".format(**cr)
+                )
+            md_lines.append("")
+            with open(os.path.join(test_samples_dir, "report.md"), 'w', encoding='utf-8') as f:
+                f.write("\n".join(md_lines))
 
             # Save sample images
-            indices = np.random.choice(len(dataset), 10)
-            path = os.path.join(self.logger.log_dir, "test_samples")
+            indices = np.random.choice(len(dataset), min(10, len(dataset)))
             save_eval_images(
                 source_images=source[indices],
                 target_images=target[indices],

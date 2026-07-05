@@ -147,7 +147,7 @@ def compute_metrics(
     subject_ids=None,
     report_path=None
 ):
-    """ Compute PSNR and SSIM between gt_images and pred_images.
+    """ Compute PSNR, SSIM, MAE, MSE, RMSE, NRMSE, and NCC between gt_images and pred_images.
     
     Args:
         gt_images (torch.Tensor): Ground truth images.
@@ -158,7 +158,7 @@ def compute_metrics(
         subject_ids (list): List of subject IDs for each slice.
 
     Returns:
-        dict: Dictionary containing PSNR and SSIM values.
+        dict: Dictionary containing all metric values.
     
     """
     with warnings.catch_warnings():
@@ -171,12 +171,16 @@ def compute_metrics(
         gt_images = gt_images[None, ...] if gt_images.ndim == 2 else gt_images
         pred_images = pred_images[None, ...] if pred_images.ndim == 2 else pred_images
 
-        assert gt_images.shape == pred_images.shape, \
-            "Ground truth and predicted images must have the same shape"
+        assert gt_images.shape == pred_images.shape,             "Ground truth and predicted images must have the same shape"
         
         # Compute psnr and ssim
         psnr_values = []
         ssim_values = []
+        mae_values = []
+        mse_values = []
+        rmse_values = []
+        nrmse_values = []
+        ncc_values = []
 
         # Normalize function
         if norm == 'mean':
@@ -210,7 +214,7 @@ def compute_metrics(
             gt_images = norm_func(gt_images)
             pred_images = norm_func(pred_images)
 
-        # Compute psnr and ssim
+        # Compute per-slice metrics
         for gt, pred in zip(gt_images, pred_images):
             gt = gt.squeeze()
             pred = pred.squeeze()
@@ -220,10 +224,28 @@ def compute_metrics(
 
             ssim_value = ssim(gt, pred, data_range=gt.max())*100
             ssim_values.append(ssim_value)
+            
+            # Compute additional metrics
+            diff = gt - pred
+            mae_values.append(np.mean(np.abs(diff)))
+            mse = np.mean(diff ** 2)
+            mse_values.append(mse)
+            rmse = np.sqrt(mse)
+            rmse_values.append(rmse)
+            data_range_gt = gt.max() - gt.min()
+            nrmse_values.append(rmse / (data_range_gt + 1e-8))
+            with np.errstate(invalid='ignore'):
+                cc = np.corrcoef(gt.ravel(), pred.ravel())[0, 1]
+            ncc_values.append(cc if not np.isnan(cc) else 0.0)
 
         # Convert list to numpy array
         psnr_values = np.asarray(psnr_values)
         ssim_values = np.asarray(ssim_values)
+        mae_values = np.asarray(mae_values)
+        mse_values = np.asarray(mse_values)
+        rmse_values = np.asarray(rmse_values)
+        nrmse_values = np.asarray(nrmse_values)
+        ncc_values = np.asarray(ncc_values)
 
         # Compute subject reports
         subject_reports = {}
@@ -236,35 +258,81 @@ def compute_metrics(
                     'psnr_mean': np.nanmean(psnr_values[idx]),
                     'ssim_mean': np.nanmean(ssim_values[idx]),
                     'psnr_std': np.nanstd(psnr_values[idx]),
-                    'ssim_std': np.nanstd(ssim_values[idx])
+                    'ssim_std': np.nanstd(ssim_values[idx]),
+                    'maes': mae_values[idx],
+                    'mses': mse_values[idx],
+                    'rmses': rmse_values[idx],
+                    'nrmses': nrmse_values[idx],
+                    'nccs': ncc_values[idx],
+                    'mae_mean': np.nanmean(mae_values[idx]),
+                    'mse_mean': np.nanmean(mse_values[idx]),
+                    'rmse_mean': np.nanmean(rmse_values[idx]),
+                    'nrmse_mean': np.nanmean(nrmse_values[idx]),
+                    'ncc_mean': np.nanmean(ncc_values[idx]),
+                    'mae_std': np.nanstd(mae_values[idx]),
+                    'mse_std': np.nanstd(mse_values[idx]),
+                    'rmse_std': np.nanstd(rmse_values[idx]),
+                    'nrmse_std': np.nanstd(nrmse_values[idx]),
+                    'ncc_std': np.nanstd(ncc_values[idx]),
                 }
                 subject_reports[i] = subject_report
             
         # Compute mean and std values
-        if subject_ids is not None:
-            psnr_mean = np.nanmean([report['psnr_mean'] for report in subject_reports.values()])
-            ssim_mean = np.nanmean([report['ssim_mean'] for report in subject_reports.values()])
+        def _case_avg(k):
+            return np.nanmean([r[k] for r in subject_reports.values()])
+        def _case_std(k):
+            return np.nanstd([r[k] for r in subject_reports.values()])
 
-            psnr_std = np.nanstd([report['psnr_mean'] for report in subject_reports.values()])
-            ssim_std = np.nanstd([report['ssim_mean'] for report in subject_reports.values()])
+        if subject_ids is not None:
+            psnr_mean = _case_avg('psnr_mean')
+            ssim_mean = _case_avg('ssim_mean')
+            psnr_std = _case_std('psnr_mean')
+            ssim_std = _case_std('ssim_mean')
+            mae_mean = _case_avg('mae_mean')
+            mse_mean = _case_avg('mse_mean')
+            rmse_mean = _case_avg('rmse_mean')
+            nrmse_mean = _case_avg('nrmse_mean')
+            ncc_mean = _case_avg('ncc_mean')
+            mae_std = _case_std('mae_mean')
+            mse_std = _case_std('mse_mean')
+            rmse_std = _case_std('rmse_mean')
+            nrmse_std = _case_std('nrmse_mean')
+            ncc_std = _case_std('ncc_mean')
         else:
             psnr_mean = np.nanmean(psnr_values)
             ssim_mean = np.nanmean(ssim_values)
-
             psnr_std = np.nanstd(psnr_values)
             ssim_std = np.nanstd(ssim_values)
+            mae_mean = np.nanmean(mae_values)
+            mse_mean = np.nanmean(mse_values)
+            rmse_mean = np.nanmean(rmse_values)
+            nrmse_mean = np.nanmean(nrmse_values)
+            ncc_mean = np.nanmean(ncc_values)
+            mae_std = np.nanstd(mae_values)
+            mse_std = np.nanstd(mse_values)
+            rmse_std = np.nanstd(rmse_values)
+            nrmse_std = np.nanstd(nrmse_values)
+            ncc_std = np.nanstd(ncc_values)
         
         if report_path is not None:
             with open(report_path, 'w') as f:
-                f.write(f'PSNR: {psnr_mean:.2f} ± {psnr_std:.2f}\n')
-                f.write(f'SSIM: {ssim_mean:.2f} ± {ssim_std:.2f}\n')
+                f.write(f'PSNR: {psnr_mean:.2f} +/- {psnr_std:.2f}\n')
+                f.write(f'SSIM: {ssim_mean:.2f} +/- {ssim_std:.2f}\n')
+                f.write(f'MAE: {mae_mean:.4f} +/- {mae_std:.4f}\n')
+                f.write(f'MSE: {mse_mean:.4f} +/- {mse_std:.4f}\n')
+                f.write(f'RMSE: {rmse_mean:.4f} +/- {rmse_std:.4f}\n')
+                f.write(f'NRMSE: {nrmse_mean:.4f} +/- {nrmse_std:.4f}\n')
+                f.write(f'NCC: {ncc_mean:.4f} +/- {ncc_std:.4f}\n')
                 f.write('\n')
 
                 if subject_ids is not None:
                     for subject_id, report in subject_reports.items():
                         f.write(f'Subject {subject_id}\n')
-                        f.write(f'PSNR: {report["psnr_mean"]:.2f} ± {report["psnr_std"]:.2f}\n')
-                        f.write(f'SSIM: {report["ssim_mean"]:.2f} ± {report["ssim_std"]:.2f}\n')
+                        f.write(f'PSNR: {report["psnr_mean"]:.2f} +/- {report["psnr_std"]:.2f}\n')
+                        f.write(f'SSIM: {report["ssim_mean"]:.2f} +/- {report["ssim_std"]:.2f}\n')
+                        f.write(f'MAE: {report["mae_mean"]:.4f} +/- {report["mae_std"]:.4f}\n')
+                        f.write(f'RMSE: {report["rmse_mean"]:.4f} +/- {report["rmse_std"]:.4f}\n')
+                        f.write(f'NCC: {report["ncc_mean"]:.4f} +/- {report["ncc_std"]:.4f}\n')
                         f.write('\n')         
 
         res = {
@@ -272,8 +340,23 @@ def compute_metrics(
             'ssim_mean': ssim_mean,
             'psnr_std': psnr_std,
             'ssim_std': ssim_std,
+            'mae_mean': mae_mean,
+            'mse_mean': mse_mean,
+            'rmse_mean': rmse_mean,
+            'nrmse_mean': nrmse_mean,
+            'ncc_mean': ncc_mean,
+            'mae_std': mae_std,
+            'mse_std': mse_std,
+            'rmse_std': rmse_std,
+            'nrmse_std': nrmse_std,
+            'ncc_std': ncc_std,
             'psnrs': psnr_values,
             'ssims': ssim_values,
+            'maes': mae_values,
+            'mses': mse_values,
+            'rmses': rmse_values,
+            'nrmses': nrmse_values,
+            'nccs': ncc_values,
             'subject_reports': subject_reports
         }
 

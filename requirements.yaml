@@ -9,15 +9,19 @@ dependencies:
   - python=3.8
   - numpy
   - pytorch::pytorch=1.13.1
-  - torchvision=0.14.1
-  - nvidia::cudatoolkit=11.7
+  - pytorch::torchvision=0.14.1
+  - pytorch::pytorch-cuda=11.7
   - lightning=2.2.4
+  - scipy
   - scikit-image
   - matplotlib
+  - nibabel
   - pyyaml
   - ninja
+  - tqdm
   - rich
   - omegaconf
   - pip
   - pip:
+    - Pillow==10.4.0
     - jsonargparse[signatures]>=4.27.7
